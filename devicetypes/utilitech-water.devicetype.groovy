@@ -53,7 +53,7 @@ preferences {
 }
 
 metadata {
-	definition (name: "Utilitech Water Sensor", author: "tosa68") {
+	definition (name: "Utilitech Water Sensor", namespace: "tosa68" author: "tony saye") {
 		capability "Water Sensor"
 		capability "Battery"
 		capability "Configuration"
