@@ -13,6 +13,10 @@
  *                            - option to always report Battery status in activity feed
  *                              (will report Battery changes regardless of this setting);
  *                            - confirm WakeUpInterval change in activity feed
+ *  Version 1.0 (2017-08-14): added capability "Sensor" and "Actuator" for ActionTiles compatiblity (thanks @moritzes)
+ *                            changed to multiAttributeTile layout (thanks @johnconstantelo)
+ *                            added "Woke Up" tile to toggle display between time of last wake up and elapsed time since last wake up
+ *  Version 1.1 (2019-11-18): minor code clean up and update to GitHub                          
  *                             
  *
  *  Features:
@@ -57,6 +61,10 @@ metadata {
 		capability "Water Sensor"
 		capability "Battery"
 		capability "Configuration"
+        capability "Sensor"
+        capability "Actuator"
+        
+        command "toggleWakeUpStatus"
         
         fingerprint deviceId: "0xA102", inClusters: "0x86,0x72,0x85,0x84,0x80,0x70,0x9C,0x20,0x71"
 	}
@@ -72,13 +80,15 @@ metadata {
 		}
     }
     
-	tiles {
-		standardTile("water", "device.water", width: 2, height: 2) {
-			state "dry", icon:"st.alarm.water.dry", backgroundColor:"#ffffff"
-			state "wet", icon:"st.alarm.water.wet", backgroundColor:"#53a7c0"
+    tiles (scale:2) {
+		multiAttributeTile(name:"water", type: "generic", width: 6, height: 4) {
+			tileAttribute ("device.water", key: "PRIMARY_CONTROL") {
+				attributeState "dry", label:'${name}', icon:"st.alarm.water.dry", backgroundColor:"#ffffff"
+				attributeState "wet", label:'${name}', icon:"st.alarm.water.wet", backgroundColor:"#00a0dc"
+			}
 		}
-		valueTile("battery", "device.battery", inactiveLabel: false, canChangeBackground: true) {
-			state "battery", label:'${currentValue}% Battery', unit:"",
+		valueTile("battery", "device.battery", inactiveLabel: false, canChangeBackground: true, width: 2, height: 2) {
+			state "battery", label:'${currentValue}%\nBattery', unit:"",
             backgroundColors:[
 				[value: 19, color: "#BC2323"],
 				[value: 20, color: "#D04E00"],
@@ -87,11 +97,16 @@ metadata {
 				[value: 41, color: "#79b821"]
 			]
 		}
-		standardTile("configure", "device.configure", inactiveLabel: false, decoration: "flat") {
+        valueTile("wakeUpStatus", "device.wakeUpStatus", inactiveLabel: false, decoration: "flat", width: 2, height: 2) {
+            state "wakeUpStatus", label:'${currentValue}', unit:"", action: "toggleWakeUpStatus"
+            // green = #44b621; yellow = #f1d801; orange = #d04e00; red = #bc2323
+            // attention orange = #e86d13; battery green = #79b821
+        }
+		standardTile("configure", "device.configure", inactiveLabel: false, decoration: "flat", width: 2, height: 2) {
 			state "configure", label:'', action:"configuration.configure", icon:"st.secondary.configure"
 		}
 		main "water"
-		details(["water", "battery", "configure"])
+		details(["water", "battery", "wakeUpStatus", "configure"])
 	}
 }
 
@@ -108,6 +123,8 @@ def parse(String description) {
         log.debug "Non-parsed event: ${description}"
     }
 
+    updateStatus()
+    
 	return result
 }
 
@@ -148,6 +165,8 @@ def zwaveEvent(physicalgraph.zwave.commands.wakeupv2.WakeUpNotification cmd) {
     result << response("delay 200")
     result << response(zwave.batteryV1.batteryGet())
     
+    state.lastWakeUp = now()
+    
     return result
 }
 
@@ -158,8 +177,9 @@ def zwaveEvent(physicalgraph.zwave.commands.sensoralarmv1.SensorAlarmReport cmd)
 		map.name = "water"
 		map.value = cmd.sensorState ? "wet" : "dry"
 		map.descriptionText = "${device.displayName} is ${map.value}"
+	} else {
+		map.descriptionText = "${device.displayName}: ${cmd}"
 	}
-    
 	createEvent(map)
 }
 
@@ -169,7 +189,6 @@ def zwaveEvent(physicalgraph.zwave.commands.sensorbinaryv1.SensorBinaryReport cm
 	map.name = "water"
 	map.value = cmd.sensorValue ? "wet" : "dry"
 	map.descriptionText = "${device.displayName} is ${map.value}"
-    
 	createEvent(map)
 }
 
@@ -203,7 +222,7 @@ def zwaveEvent(physicalgraph.zwave.commands.batteryv1.BatteryReport cmd) {
 	def map = [ name: "battery", unit: "%" ]
 	if (cmd.batteryLevel == 0xFF) {           // Special value for low battery alert
 		map.value = 10                        // will display (and alarm in mobile app) as 10% battery remaining, even though it's really 1%-19% remaining
-		map.descriptionText = "${device.displayName} reports a low battery"
+		map.descriptionText = "${device.displayName} has a low battery"
         map.isStateChange = true
 		map.displayed = true
 	} else {
@@ -211,7 +230,6 @@ def zwaveEvent(physicalgraph.zwave.commands.batteryv1.BatteryReport cmd) {
 		if (alwaysShowBattery) { map.isStateChange = true } // always report battery level in activity feed
 		map.displayed = true
 	}
-
     createEvent(map)
 }
 
@@ -243,7 +261,7 @@ def zwaveEvent(physicalgraph.zwave.Command cmd) {
 def configure() {
     
     state.wakeUpInterval = getUserWakeUp(userWakeUpInterval)
-    
+
     delayBetween([
         zwave.associationV2.associationSet(groupingIdentifier:1, nodeId:zwaveHubNodeId).format(),
         zwave.wakeUpV2.wakeUpIntervalSet(seconds:state.wakeUpInterval, nodeid:zwaveHubNodeId).format(),
@@ -251,6 +269,40 @@ def configure() {
         zwave.batteryV1.batteryGet().format()
     ], 200)
 
+}
+
+def toggleWakeUpStatus() {
+    state.toggleWakeUpStatus = state.toggleWakeUpStatus ? false : true
+    updateStatus()
+}
+
+private updateStatus(){
+    def currentInterval = now() - state.lastWakeUp
+    def minutesElapsed = (currentInterval/1000/60).toInteger()
+    def hoursElapsed = (currentInterval/1000/60/60).toInteger()
+    
+    //def timeString = new Date().format("MM-dd-yy h:mm a", location.timeZone)
+    def today    = new Date(now()).format("MM-dd-yy", location.timeZone)
+    def lastDay  = new Date(state.lastWakeUp).format("MM-dd-yy", location.timeZone)
+    def lastTime = new Date(state.lastWakeUp).format("h:mm a", location.timeZone)
+    
+    (lastDay == today) ? (lastTime = "Today\n" + lastTime) : (lastTime = lastDay + "\n" + lastTime)
+    
+    String statusText = "Woke Up:\n"
+    if (state.toggleWakeUpStatus) {
+        statusText = statusText + (hoursElapsed ? hoursElapsed.toString() + " hours " : minutesElapsed.toString() + " minutes " ) + "ago"
+    } else {
+        statusText = statusText + lastTime
+    }
+    
+    if (currentInterval.toInteger()/1000 > state.wakeUpInterval) {
+        state.missedWakeUp = (currentInterval.toInteger()/1000/state.wakeUpInterval).toInteger()
+        log.debug "current interval: " + currentInterval.toInteger()/1000 + "; wakeUpInterval: " + state.wakeUpInterval
+        log.debug "# missed wakeups: " + state.missedWakeUp
+    }
+    //log.debug statusText
+    
+    sendEvent(name:"wakeUpStatus", value: statusText, displayed:false)
 }
 
 private getUserWakeUp(userWake) {
@@ -272,4 +324,3 @@ private getUserWakeUp(userWake) {
 
     return userWake.toInteger()
 }
-
